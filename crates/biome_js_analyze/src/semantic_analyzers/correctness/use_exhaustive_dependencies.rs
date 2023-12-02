@@ -216,6 +216,8 @@ pub struct HooksOptions {
     #[bpaf(external, hide, many)]
     /// List of safe hooks
     pub hooks: Vec<Hooks>,
+    #[bpaf(external, hide, many)]
+    pub stable_hooks: Vec<StableHooks>,
 }
 
 impl FromStr for HooksOptions {
@@ -249,7 +251,7 @@ impl DeserializationVisitor for HooksOptionsVisitor {
         _name: &str,
         diagnostics: &mut Vec<DeserializationDiagnostic>,
     ) -> Option<Self::Output> {
-        const ALLOWED_KEYS: &[&str] = &["hooks"];
+        const ALLOWED_KEYS: &[&str] = &["hooks", "stableHooks"];
         let mut result = Self::Output::default();
         for (key, value) in members.flatten() {
             let Some(key_text) = Text::deserialize(&key, "", diagnostics) else {
@@ -266,6 +268,10 @@ impl DeserializationVisitor for HooksOptionsVisitor {
                                 .with_range(val_range),
                         );
                     }
+                }
+                "stableHooks" => {
+                    result.stable_hooks = Deserializable::deserialize(&value, &key_text, diagnostics)
+                        .unwrap_or_default();
                 }
                 text => diagnostics.push(DeserializationDiagnostic::new_unknown_key(
                     text,
@@ -310,6 +316,36 @@ impl Deserializable for Hooks {
         diagnostics: &mut Vec<DeserializationDiagnostic>,
     ) -> Option<Self> {
         value.deserialize(HooksVisitor, name, diagnostics)
+    }
+}
+
+
+#[derive(Default, Deserialize, Serialize, Eq, PartialEq, Debug, Clone, Bpaf)]
+#[cfg_attr(feature = "schemars", derive(JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StableHooks {
+    #[bpaf(hide)]
+    /// The name of the stable hook
+    pub name: String,
+    #[bpaf(hide)]
+    /// The "position" of the stable return value, if applicable
+    pub index: Option<usize>,
+}
+impl FromStr for StableHooks {
+    type Err = ();
+
+    fn from_str(_s: &str) -> Result<Self, Self::Err> {
+        Ok(StableHooks::default())
+    }
+}
+
+impl Deserializable for StableHooks {
+    fn deserialize(
+        value: &impl DeserializableValue,
+        name: &str,
+        diagnostics: &mut Vec<DeserializationDiagnostic>,
+    ) -> Option<Self> {
+        value.deserialize(StableHooksVisitor, name, diagnostics)
     }
 }
 
@@ -365,6 +401,58 @@ impl DeserializationVisitor for HooksVisitor {
     }
 }
 
+struct StableHooksVisitor;
+impl DeserializationVisitor for StableHooksVisitor {
+    type Output = StableHooks;
+
+    const EXPECTED_TYPE: VisitableType = VisitableType::MAP;
+
+    fn visit_map(
+        self,
+        members: impl Iterator<Item = Option<(impl DeserializableValue, impl DeserializableValue)>>,
+        _range: TextRange,
+        _name: &str,
+        diagnostics: &mut Vec<DeserializationDiagnostic>,
+    ) -> Option<Self::Output> {
+        const ALLOWED_KEYS: &[&str] = &["name", "closureIndex", "dependenciesIndex"];
+        let mut result = Self::Output::default();
+        for (key, value) in members.flatten() {
+            let Some(key_text) = Text::deserialize(&key, "", diagnostics) else {
+                continue;
+            };
+            match key_text.text() {
+                "name" => {
+                    let val_range = value.range();
+                    result.name = Deserializable::deserialize(&value, &key_text, diagnostics)
+                        .unwrap_or_default();
+                    if result.name.is_empty() {
+                        diagnostics.push(
+                            DeserializationDiagnostic::new(markup!(
+                                "The field "<Emphasis>"name"</Emphasis>" is mandatory"
+                            ))
+                            .with_range(val_range),
+                        )
+                    }
+                }
+                "index" => {
+                    let val_num = Deserializable::deserialize(&value, &key_text, diagnostics);
+                    if val_num == Some(100) {
+                        result.index = None;
+                    } else {
+                        result.index = val_num;
+                    }
+                }
+                unknown_key => diagnostics.push(DeserializationDiagnostic::new_unknown_key(
+                    unknown_key,
+                    key.range(),
+                    ALLOWED_KEYS,
+                )),
+            }
+        }
+        Some(result)
+    }
+}
+
 impl ReactExtensiveDependenciesOptions {
     pub fn new(hooks: HooksOptions) -> Self {
         let mut default = ReactExtensiveDependenciesOptions::default();
@@ -375,6 +463,11 @@ impl ReactExtensiveDependenciesOptions {
                     closure_index: hook.closure_index,
                     dependencies_index: hook.dependencies_index,
                 },
+            );
+        }
+        for stable in hooks.stable_hooks {
+            default.stable_config.insert(
+                StableReactHookConfiguration::new(&stable.name, stable.index)
             );
         }
 
